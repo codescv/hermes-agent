@@ -3440,7 +3440,7 @@ class DiscordAdapter(BasePlatformAdapter):
             message_type=msg_type,
             source=source,
             raw_message=interaction,
-            channel_prompt=self._resolve_channel_prompt(channel_id, parent_id or None),
+            channel_prompt=self._resolve_channel_prompt(channel_id, parent_id or None, channel=getattr(interaction, "channel", None)),
         )
 
     # ------------------------------------------------------------------
@@ -3517,7 +3517,7 @@ class DiscordAdapter(BasePlatformAdapter):
         _parent_channel = self._thread_parent_channel(getattr(interaction, "channel", None))
         _parent_id = str(getattr(_parent_channel, "id", "") or "")
         _skills = self._resolve_channel_skills(thread_id, _parent_id or None)
-        _channel_prompt = self._resolve_channel_prompt(thread_id, _parent_id or None)
+        _channel_prompt = self._resolve_channel_prompt(thread_id, _parent_id or None, channel=getattr(interaction, "channel", None))
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
@@ -3540,8 +3540,27 @@ class DiscordAdapter(BasePlatformAdapter):
         from gateway.platforms.base import resolve_channel_skills
         return resolve_channel_skills(self.config.extra, channel_id, parent_id)
 
-    def _resolve_channel_prompt(self, channel_id: str, parent_id: str | None = None) -> str | None:
-        """Resolve a Discord per-channel prompt, preferring the exact channel over its parent."""
+    def _resolve_channel_prompt(self, channel_id: str, parent_id: str | None = None, channel: Any = None) -> str | None:
+        """Resolve a Discord per-channel prompt, preferring the channel topic or a configured prompt."""
+        client = getattr(self, "_client", None)
+        if not channel and client:
+            try:
+                channel = client.get_channel(int(channel_id))
+            except Exception:
+                pass
+
+        if channel:
+            topic = getattr(channel, "topic", None)
+            if not topic:
+                parent = getattr(channel, "parent", None)
+                if parent:
+                    topic = getattr(parent, "topic", None)
+
+            if topic:
+                topic_str = str(topic).strip()
+                if topic_str:
+                    return topic_str
+
         from gateway.platforms.base import resolve_channel_prompt
         return resolve_channel_prompt(self.config.extra, channel_id, parent_id)
 
@@ -4396,7 +4415,7 @@ class DiscordAdapter(BasePlatformAdapter):
         _parent_id = str(getattr(_chan, "parent_id", "") or "")
         _chan_id = str(getattr(_chan, "id", ""))
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
-        _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
+        _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None, channel=_chan)
 
         reply_to_id = None
         reply_to_text = None

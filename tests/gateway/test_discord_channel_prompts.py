@@ -180,6 +180,33 @@ class TestResolveChannelPrompts:
         adapter.config.extra = {"channel_prompts": {"100": "   "}}
         assert adapter._resolve_channel_prompt("100") is None
 
+    def test_resolve_channel_prompt_from_channel_topic(self):
+        adapter = _make_adapter()
+        channel = SimpleNamespace(topic="Coding assistant channel topic")
+        assert adapter._resolve_channel_prompt("100", channel=channel) == "Coding assistant channel topic"
+
+    def test_resolve_channel_prompt_from_thread_parent_topic(self):
+        adapter = _make_adapter()
+        parent = SimpleNamespace(topic="Parent channel topic")
+        channel = SimpleNamespace(parent=parent)
+        channel.type = SimpleNamespace(value=11)
+        assert adapter._resolve_channel_prompt("999", channel=channel) == "Parent channel topic"
+
+    def test_resolve_channel_prompt_falls_back_to_config(self):
+        adapter = _make_adapter()
+        adapter.config.extra = {"channel_prompts": {"100": "Config prompt"}}
+        channel = SimpleNamespace(topic=None)
+        assert adapter._resolve_channel_prompt("100", channel=channel) == "Config prompt"
+
+    def test_resolve_channel_prompt_from_channel_topic_via_client_cache(self):
+        adapter = _make_adapter()
+        channel = SimpleNamespace(topic="Cached channel topic")
+        adapter._client = MagicMock()
+        adapter._client.get_channel.return_value = channel
+        
+        assert adapter._resolve_channel_prompt("100") == "Cached channel topic"
+        adapter._client.get_channel.assert_called_once_with(100)
+
 
 @pytest.mark.asyncio
 async def test_retry_preserves_channel_prompt(monkeypatch):
