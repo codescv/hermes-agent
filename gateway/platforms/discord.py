@@ -5233,8 +5233,9 @@ if DISCORD_AVAILABLE:
             on_option_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            timeout: Optional[float] = 57600,
         ):
-            super().__init__(timeout=300)
+            super().__init__(timeout=timeout)
             self.choices = choices
             self.session_key = session_key
             self.on_option_selected = on_option_selected
@@ -5253,7 +5254,7 @@ if DISCORD_AVAILABLE:
             for idx, choice_text in enumerate(self.choices[:20]):
                 btn = discord.ui.Button(
                     label=choice_text[:80],
-                    style=discord.ButtonStyle.blurple if idx == 0 else discord.ButtonStyle.grey,
+                    style=discord.ButtonStyle.blurple,
                     custom_id=f"followup_opt_{idx}",
                 )
 
