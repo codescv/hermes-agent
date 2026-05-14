@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import threading
 import os
+import random
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -127,6 +128,15 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     if not state:
         state = "scheduled" if normalized.get("enabled", True) else "paused"
     normalized["state"] = state
+
+    prob = job.get("probability")
+    if prob is None:
+        normalized["probability"] = 1.0
+    else:
+        try:
+            normalized["probability"] = float(prob)
+        except (ValueError, TypeError):
+            normalized["probability"] = 1.0
 
     return normalized
 
@@ -496,6 +506,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
+    probability: float = 1.0,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -574,6 +585,12 @@ def create_job(
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
+    try:
+        normalized_prob = float(probability) if probability is not None else 1.0
+        if not (0.0 <= normalized_prob <= 1.0):
+            raise ValueError("probability must be between 0.0 and 1.0")
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid probability: {e}")
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -627,6 +644,7 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        "probability": normalized_prob,
     }
 
     jobs = load_jobs()
@@ -668,6 +686,18 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["workdir"] = None
             else:
                 updates["workdir"] = _normalize_workdir(_wd)
+
+        if "probability" in updates:
+            if updates["probability"] is not None:
+                try:
+                    prob_val = float(updates["probability"])
+                    if not (0.0 <= prob_val <= 1.0):
+                        raise ValueError("probability must be between 0.0 and 1.0")
+                    updates["probability"] = prob_val
+                except (ValueError, TypeError) as e:
+                    raise ValueError(f"Invalid probability: {e}")
+            else:
+                updates["probability"] = 1.0
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates
@@ -960,6 +990,48 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             needs_save = True
                             break
                     continue  # Skip this run
+
+            prob = job.get("probability")
+            if prob is not None:
+                try:
+                    prob = float(prob)
+                except (ValueError, TypeError):
+                    prob = 1.0
+            else:
+                prob = 1.0
+
+            if prob < 1.0 and random.random() > prob:
+                if kind in {"cron", "interval"}:
+                    new_next = compute_next_run(schedule, now.isoformat())
+                    if new_next:
+                        logger.info(
+                            "Job '%s' skipped due to probability check (prob=%.2f). "
+                            "Fast-forwarding to next run: %s",
+                            job.get("name", job["id"]),
+                            prob,
+                            new_next,
+                        )
+                        for rj in raw_jobs:
+                            if rj["id"] == job["id"]:
+                                rj["next_run_at"] = new_next
+                                needs_save = True
+                                break
+                else:
+                    logger.info(
+                        "One-shot job '%s' skipped due to probability check (prob=%.2f). "
+                        "Marking as completed.",
+                        job.get("name", job["id"]),
+                        prob,
+                    )
+                    for rj in raw_jobs:
+                        if rj["id"] == job["id"]:
+                            rj["enabled"] = False
+                            rj["state"] = "completed"
+                            rj["last_run_at"] = now.isoformat()
+                            rj["next_run_at"] = None
+                            needs_save = True
+                            break
+                continue
 
             due.append(job)
 

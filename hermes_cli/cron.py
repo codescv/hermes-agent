@@ -88,6 +88,9 @@ def cron_list(show_all: bool = False):
         print(f"    Repeat:    {repeat_str}")
         print(f"    Next run:  {next_run}")
         print(f"    Deliver:   {deliver_str}")
+        prob = job.get("probability", 1.0)
+        if prob < 1.0:
+            print(f"    Probability: {prob}")
         if skills:
             print(f"    Skills:    {', '.join(skills)}")
         script = job.get("script")
@@ -175,6 +178,7 @@ def cron_create(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", False) or None,
+        probability=getattr(args, "probability", None),
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -182,9 +186,12 @@ def cron_create(args):
     print(color(f"Created job: {result['job_id']}", Colors.GREEN))
     print(f"  Name: {result['name']}")
     print(f"  Schedule: {result['schedule']}")
+    job_data = result.get("job", {})
+    prob = job_data.get("probability", 1.0)
+    if prob < 1.0:
+        print(f"  Probability: {prob}")
     if result.get("skills"):
         print(f"  Skills: {', '.join(result['skills'])}")
-    job_data = result.get("job", {})
     if job_data.get("script"):
         print(f"  Script: {job_data['script']}")
     if job_data.get("no_agent"):
@@ -231,6 +238,7 @@ def cron_edit(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", None),
+        probability=getattr(args, "probability", None),
     )
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -240,6 +248,9 @@ def cron_edit(args):
     print(color(f"Updated job: {updated['job_id']}", Colors.GREEN))
     print(f"  Name: {updated['name']}")
     print(f"  Schedule: {updated['schedule']}")
+    prob = updated.get("probability", 1.0)
+    if prob < 1.0:
+        print(f"  Probability: {prob}")
     if updated.get("skills"):
         print(f"  Skills: {', '.join(updated['skills'])}")
     else:
