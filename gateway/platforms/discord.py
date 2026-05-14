@@ -1469,6 +1469,49 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.error("[%s] Failed to send Discord message: %s", self.name, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: list = None,
+        clarify_id: str = "",
+        session_key: str = "",
+        metadata: dict = None,
+    ) -> SendResult:
+        """Send a clarify prompt using native Discord buttons."""
+        if not choices:
+            return await super().send_clarify(chat_id, question, choices, clarify_id, session_key, metadata)
+
+        try:
+            view = ClarifyView(
+                clarify_id=clarify_id,
+                choices=choices,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            
+            # Use metadata thread_id if available
+            target_id = int(metadata.get("thread_id") or chat_id)
+            channel = self._client.get_channel(target_id)
+            if not channel:
+                channel = await self._client.fetch_channel(target_id)
+            
+            if not channel:
+                return SendResult(success=False, error=f"Target {target_id} not found")
+
+            embed = discord.Embed(
+                title="❓ Clarification Required",
+                description=question,
+                color=discord.Color.blue()
+            )
+            
+            msg = await channel.send(embed=embed, view=view)
+            return SendResult(success=True, message_id=str(msg.id))
+        except Exception as e:
+            logger.error("[Discord] send_clarify failed: %s", e, exc_info=True)
+            return await super().send_clarify(chat_id, question, choices, clarify_id, session_key, metadata)
+
     async def _send_to_forum(self, forum_channel: Any, content: str) -> SendResult:
         """Create a thread post in a forum channel with the message as starter content.
 
@@ -5118,3 +5161,96 @@ if DISCORD_AVAILABLE:
         async def on_timeout(self):
             self.resolved = True
             self.clear_items()
+
+    class ClarifyView(discord.ui.View):
+        """Interactive button view for user clarification prompts.
+
+        Shows up to 4 choices as buttons, plus an 'Other' button for free-text.
+        Clicking a choice resolves the clarify tool's wait; 'Other' flips the
+        entry into text-intercept mode.
+        """
+
+        def __init__(
+            self,
+            clarify_id: str,
+            choices: list,
+            allowed_user_ids: set,
+            allowed_role_ids: set = None,
+        ):
+            super().__init__(timeout=300)
+            self.clarify_id = clarify_id
+            self.choices = choices
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+            # Add buttons for each choice (Discord limit is 5 buttons per row)
+            for idx, choice in enumerate(choices[:4]):
+                label = choice if len(choice) <= 80 else f"{choice[:77]}..."
+                btn = discord.ui.Button(
+                    label=label,
+                    style=discord.ButtonStyle.blurple,
+                    custom_id=f"cl:{clarify_id}:{idx}",
+                )
+                btn.callback = self._on_button_click
+                self.add_item(btn)
+
+            # Add "Other" button for free-form responses
+            other_btn = discord.ui.Button(
+                label="Other (type answer)",
+                style=discord.ButtonStyle.grey,
+                custom_id=f"cl:{clarify_id}:other",
+            )
+            other_btn.callback = self._on_button_click
+            self.add_item(other_btn)
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        async def _on_button_click(self, interaction: discord.Interaction):
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This prompt has already been resolved~", ephemeral=True
+                )
+                return
+
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~", ephemeral=True
+                )
+                return
+
+            self.resolved = True
+            custom_id = interaction.data["custom_id"]
+            parts = custom_id.split(":")
+            choice_val = parts[-1]
+
+            # Disable all buttons
+            for child in self.children:
+                child.disabled = True
+
+            from tools.clarify_gateway import resolve_gateway_clarify, mark_awaiting_text
+            
+            if choice_val == "other":
+                mark_awaiting_text(self.clarify_id)
+                await interaction.response.edit_message(
+                    content=f"{interaction.message.content}\n*Awaiting text response...*",
+                    view=self,
+                )
+            else:
+                try:
+                    idx = int(choice_val)
+                    choice_text = self.choices[idx]
+                    resolve_gateway_clarify(self.clarify_id, choice_text)
+                    
+                    # Update embed to show the selected choice
+                    embed = interaction.message.embeds[0] if interaction.message.embeds else None
+                    if embed:
+                        embed.color = discord.Color.green()
+                        embed.set_footer(text=f"Selected: {choice_text} by {interaction.user.display_name}")
+                    
+                    await interaction.response.edit_message(embed=embed, view=self)
+                except (ValueError, IndexError):
+                    await interaction.response.edit_message(view=self)
