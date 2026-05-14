@@ -15001,61 +15001,70 @@ class GatewayRunner:
             # rather than hang forever).
             # ------------------------------------------------------------------
             def _clarify_callback_sync(question: str, choices) -> str:
-                from tools import clarify_gateway as _clarify_mod
                 import uuid as _uuid
 
                 if not _status_adapter:
                     return ""
 
                 clarify_id = _uuid.uuid4().hex[:10]
-                _clarify_mod.register(
-                    clarify_id=clarify_id,
-                    session_key=session_key or "",
-                    question=question,
-                    choices=list(choices) if choices else None,
-                )
+                _choices_list = list(choices) if choices else None
 
-                # Pause typing — like approval, we don't want a "thinking..."
-                # status to obscure the prompt or block the user from typing
-                # an "Other" response on platforms that disable input while
-                # typing is active (Slack Assistant API).
+                # Register legacy clarify entry just in case fallback paths query it
                 try:
-                    _status_adapter.pause_typing_for_chat(_status_chat_id)
+                    from tools import clarify_gateway as _clarify_mod
+                    _clarify_mod.register(
+                        clarify_id=clarify_id,
+                        session_key=session_key or "",
+                        question=question,
+                        choices=_choices_list,
+                    )
                 except Exception:
                     pass
 
-                send_ok = False
-                try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        _status_adapter.send_clarify(
-                            chat_id=_status_chat_id,
-                            question=question,
-                            choices=list(choices) if choices else None,
-                            clarify_id=clarify_id,
-                            session_key=session_key or "",
-                            metadata=_status_thread_metadata,
-                        ),
-                        _loop_for_step,
-                    )
-                    result = fut.result(timeout=15)
-                    send_ok = bool(getattr(result, "success", False))
-                except Exception as exc:
-                    logger.warning("Clarify send failed: %s", exc)
-                    send_ok = False
+                def _deliver_tail_clarify() -> None:
+                    if not _status_adapter or not _run_still_current():
+                        return
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            _status_adapter.send_clarify(
+                                chat_id=_status_chat_id,
+                                question=question,
+                                choices=_choices_list,
+                                clarify_id=clarify_id,
+                                session_key=session_key or "",
+                                metadata=_status_thread_metadata,
+                            ),
+                            _loop_for_step,
+                        )
+                    except Exception as exc:
+                        logger.warning("Tail clarify delivery failed: %s", exc)
 
-                if not send_ok:
-                    # Couldn't deliver the prompt — clean up and return
-                    # sentinel so the agent can fall back to a sensible
-                    # default rather than hanging.
-                    _clarify_mod.clear_session(session_key or "")
-                    return "[clarify prompt could not be delivered]"
+                # Register post-delivery callback to send the prompt at the end of the response
+                if session_key:
+                    if getattr(type(_status_adapter), "register_post_delivery_callback", None) is not None:
+                        _status_adapter.register_post_delivery_callback(
+                            session_key,
+                            _deliver_tail_clarify,
+                            generation=run_generation,
+                        )
+                    else:
+                        _pdc = getattr(_status_adapter, "_post_delivery_callbacks", None)
+                        if _pdc is not None:
+                            # Chain if there is already a callback (e.g. bg review release)
+                            _existing = _pdc.get(session_key)
+                            if callable(_existing):
+                                _prev = _existing
+                                def _combined() -> None:
+                                    try:
+                                        _prev()
+                                    except Exception:
+                                        pass
+                                    _deliver_tail_clarify()
+                                _pdc[session_key] = _combined
+                            else:
+                                _pdc[session_key] = _deliver_tail_clarify
 
-                timeout = _clarify_mod.get_clarify_timeout()
-                response = _clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
-                if response is None or response == "":
-                    # Timeout or session-boundary cancellation
-                    return f"[user did not respond within {int(timeout / 60)}m]"
-                return response
+                return "[Clarify question scheduled to be presented at the end of your response]"
 
             agent.clarify_callback = _clarify_callback_sync
 

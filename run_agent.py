@@ -14806,6 +14806,11 @@ class AIAgent:
                     _tc_names = {tc.function.name for tc in assistant_message.tool_calls}
                     if _tc_names == {"execute_code"}:
                         self.iteration_budget.refund()
+
+                    if "clarify" in _tc_names:
+                        _turn_exit_reason = "clarify_requested"
+                        final_response = getattr(assistant_message, "content", None) or ""
+                        break
                     
                     # Use real token counts from the API response to decide
                     # compression.  prompt_tokens + completion_tokens is the
