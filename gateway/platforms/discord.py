@@ -1489,7 +1489,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 choices=choices,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
-                adapter=self,
             )
             
             # Use metadata thread_id if available
@@ -5177,15 +5176,12 @@ if DISCORD_AVAILABLE:
             choices: list,
             allowed_user_ids: set,
             allowed_role_ids: set = None,
-            timeout: float = 1800,
-            adapter=None,
         ):
-            super().__init__(timeout=timeout)
+            super().__init__(timeout=300)
             self.clarify_id = clarify_id
             self.choices = choices
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
-            self.adapter = adapter
             self.resolved = False
 
             # Add buttons for each choice (Discord limit is 5 buttons per row)
@@ -5235,24 +5231,19 @@ if DISCORD_AVAILABLE:
             for child in self.children:
                 child.disabled = True
 
+            from tools.clarify_gateway import resolve_gateway_clarify, mark_awaiting_text
+            
             if choice_val == "other":
-                embed = interaction.message.embeds[0] if interaction.message.embeds else None
-                msg_content = getattr(interaction.message, "content", "") or ""
+                mark_awaiting_text(self.clarify_id)
                 await interaction.response.edit_message(
-                    content=f"{msg_content}\n*Please type your response below...*".strip(),
-                    embed=embed,
+                    content=f"{interaction.message.content}\n*Awaiting text response...*",
                     view=self,
                 )
-                # Retain legacy mark_awaiting_text just in case
-                try:
-                    from tools.clarify_gateway import mark_awaiting_text
-                    mark_awaiting_text(self.clarify_id)
-                except Exception:
-                    pass
             else:
                 try:
                     idx = int(choice_val)
                     choice_text = self.choices[idx]
+                    resolve_gateway_clarify(self.clarify_id, choice_text)
                     
                     # Update embed to show the selected choice
                     embed = interaction.message.embeds[0] if interaction.message.embeds else None
@@ -5261,59 +5252,5 @@ if DISCORD_AVAILABLE:
                         embed.set_footer(text=f"Selected: {choice_text} by {interaction.user.display_name}")
                     
                     await interaction.response.edit_message(embed=embed, view=self)
-
-                    if hasattr(self, "adapter") and self.adapter:
-                        effective_channel = interaction.channel
-                        is_thread = isinstance(effective_channel, discord.Thread)
-                        if isinstance(effective_channel, discord.DMChannel):
-                            chat_type = "dm"
-                            chat_name = interaction.user.display_name
-                        elif is_thread:
-                            chat_type = "thread"
-                            chat_name = self.adapter._format_thread_chat_name(effective_channel)
-                        else:
-                            chat_type = "group"
-                            chat_name = getattr(effective_channel, "name", str(effective_channel.id))
-                            if hasattr(effective_channel, "guild") and effective_channel.guild:
-                                chat_name = f"{effective_channel.guild.name} / #{chat_name}"
-
-                        chat_topic = self.adapter._get_effective_topic(effective_channel, is_thread=is_thread)
-                        
-                        source = self.adapter.build_source(
-                            chat_id=str(effective_channel.id),
-                            chat_name=chat_name,
-                            chat_type=chat_type,
-                            user_id=str(interaction.user.id),
-                            user_name=interaction.user.display_name,
-                            thread_id=str(effective_channel.id) if is_thread else None,
-                            chat_topic=chat_topic,
-                            is_bot=getattr(interaction.user, "bot", False),
-                            guild_id=str(interaction.guild.id) if hasattr(interaction, "guild") and interaction.guild else None,
-                        )
-
-                        _parent_channel = self.adapter._thread_parent_channel(effective_channel)
-                        _parent_id = str(getattr(_parent_channel, "id", "") or "")
-                        _chan_id = str(getattr(effective_channel, "id", ""))
-                        _skills = self.adapter._resolve_channel_skills(_chan_id, _parent_id or None)
-                        _channel_prompt = self.adapter._resolve_channel_prompt(_chan_id, _parent_id or None, channel=effective_channel)
-
-                        event = MessageEvent(
-                            text=choice_text,
-                            message_type=MessageType.TEXT,
-                            source=source,
-                            raw_message=interaction,
-                            message_id=str(interaction.id),
-                            auto_skill=_skills,
-                            channel_prompt=_channel_prompt,
-                        )
-                        await self.adapter.handle_message(event)
-                    else:
-                        from tools.clarify_gateway import resolve_gateway_clarify
-                        resolve_gateway_clarify(self.clarify_id, choice_text)
                 except (ValueError, IndexError):
                     await interaction.response.edit_message(view=self)
-
-        async def on_timeout(self):
-            self.resolved = True
-            for child in self.children:
-                child.disabled = True
