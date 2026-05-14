@@ -3991,6 +3991,105 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_model_picker failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    async def send_followup(
+        self,
+        chat_id: str,
+        followup_data: dict,
+        session_key: str,
+        metadata: Optional[dict] = None,
+    ) -> SendResult:
+        """Send an interactive multi-choice button UI for a suggested follow-up question."""
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+
+            question = followup_data.get("question", "Follow-up Question")
+            choices = followup_data.get("choices", [])
+
+            embed = discord.Embed(
+                title="❓ Follow-up Question",
+                description=question,
+                color=discord.Color.blurple(),
+            )
+
+            view = FollowupQuestionView(
+                choices=choices,
+                session_key=session_key,
+                on_option_selected=self._on_followup_selected,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+
+            msg = await channel.send(embed=embed, view=view)
+            return SendResult(success=True, message_id=str(msg.id))
+
+        except Exception as e:
+            logger.warning("[%s] send_followup failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def _on_followup_selected(self, option_text: str, interaction: discord.Interaction):
+        """Callback when a user clicks a follow-up option button."""
+        channel = interaction.channel
+        is_thread = isinstance(channel, getattr(discord, "Thread", ()))
+        thread_id = str(channel.id) if is_thread else None
+        parent_channel_id = self._get_parent_channel_id(channel) if is_thread else None
+
+        if isinstance(channel, getattr(discord, "DMChannel", ())):
+            chat_type = "dm"
+            chat_name = interaction.user.display_name
+        elif is_thread:
+            chat_type = "thread"
+            chat_name = self._format_thread_chat_name(channel)
+        else:
+            chat_type = "group"
+            chat_name = getattr(channel, "name", str(getattr(channel, "id", "")))
+            if hasattr(channel, "guild") and channel.guild:
+                chat_name = f"{channel.guild.name} / #{chat_name}"
+
+        chat_topic = self._get_effective_topic(channel, is_thread=is_thread)
+        guild = getattr(interaction, "guild", None)
+
+        source = self.build_source(
+            chat_id=str(getattr(channel, "id", "")),
+            chat_name=chat_name,
+            chat_type=chat_type,
+            user_id=str(interaction.user.id),
+            user_name=interaction.user.display_name,
+            thread_id=thread_id,
+            chat_topic=chat_topic,
+            is_bot=getattr(interaction.user, "bot", False),
+            guild_id=str(guild.id) if guild else None,
+            parent_chat_id=parent_channel_id,
+        )
+
+        _parent_channel = self._thread_parent_channel(channel)
+        _parent_id = str(getattr(_parent_channel, "id", "") or "")
+        _chan_id = str(getattr(channel, "id", ""))
+        _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
+        _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None, channel=channel)
+
+        event = MessageEvent(
+            text=option_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=interaction,
+            auto_skill=_skills,
+            channel_prompt=_channel_prompt,
+        )
+
+        if thread_id:
+            self._threads.mark(thread_id)
+
+        await self.handle_message(event)
+
     def _get_parent_channel_id(self, channel: Any) -> Optional[str]:
         """Return the parent channel ID for a Discord thread-like channel, if present."""
         parent = getattr(channel, "parent", None)
@@ -5118,3 +5217,84 @@ if DISCORD_AVAILABLE:
         async def on_timeout(self):
             self.resolved = True
             self.clear_items()
+
+
+    class FollowupQuestionView(discord.ui.View):
+        """Interactive multi-choice button view for suggested follow-up questions.
+
+        Clicking a choice button disables the view and submits the chosen text
+        as a user turn natively into the conversation loop.
+        """
+
+        def __init__(
+            self,
+            choices: list,
+            session_key: str,
+            on_option_selected,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=300)
+            self.choices = choices
+            self.session_key = session_key
+            self.on_option_selected = on_option_selected
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+            self._build_buttons()
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        def _build_buttons(self):
+            for idx, choice_text in enumerate(self.choices[:20]):
+                btn = discord.ui.Button(
+                    label=choice_text[:80],
+                    style=discord.ButtonStyle.blurple if idx == 0 else discord.ButtonStyle.grey,
+                    custom_id=f"followup_opt_{idx}",
+                )
+
+                def make_callback(opt_str):
+                    async def cb(interaction: discord.Interaction):
+                        await self._on_click(interaction, opt_str)
+                    return cb
+
+                btn.callback = make_callback(choice_text)
+                self.add_item(btn)
+
+        async def _on_click(self, interaction: discord.Interaction, option_text: str):
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This follow-up has already been answered~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to interact with this prompt~", ephemeral=True,
+                )
+                return
+
+            self.resolved = True
+
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if embed:
+                embed.color = discord.Color.green()
+                embed.set_footer(text=f"Selected '{option_text[:30]}' by {interaction.user.display_name}")
+
+            for child in self.children:
+                child.disabled = True
+
+            await interaction.response.edit_message(embed=embed, view=self)
+
+            try:
+                await self.on_option_selected(option_text, interaction)
+            except Exception as exc:
+                logger.error("Followup callback error: %s", exc)
+
+        async def on_timeout(self):
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True

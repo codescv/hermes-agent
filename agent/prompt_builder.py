@@ -439,7 +439,9 @@ PLATFORM_HINTS = {
         "You can send media files natively: include MEDIA:/absolute/path/to/file "
         "in your response. Images (.png, .jpg, .webp) are sent as photo "
         "attachments, audio as file attachments. You can also include image URLs "
-        "in markdown format ![alt](url) and they will be sent as attachments."
+        "in markdown format ![alt](url) and they will be sent as attachments. "
+        "To suggest a follow-up question rendered with interactive multiple choice "
+        "buttons, include FOLLOWUP: <question> | <choice1> | <choice2> in your response."
     ),
     "slack": (
         "You are in a Slack workspace communicating with your user. "

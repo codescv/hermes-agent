@@ -1792,6 +1792,30 @@ class BasePlatformAdapter(ABC):
             metadata=metadata,
         )
 
+    async def send_followup(
+        self,
+        chat_id: str,
+        followup_data: Dict[str, Any],
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a suggested follow-up question and choices to the user.
+
+        The default implementation formats the follow-up question as a clear
+        numbered text list. Subclasses supporting inline interactive buttons
+        (e.g. Discord) override this to display native interactive components.
+        """
+        question = followup_data.get("question", "")
+        choices = followup_data.get("choices", [])
+        lines = [f"❓ {question}", ""]
+        for i, choice in enumerate(choices, start=1):
+            lines.append(f"  {i}. {choice}")
+        return await self.send(
+            chat_id=chat_id,
+            content="\n".join(lines),
+            metadata=metadata,
+        )
+
     async def send_private_notice(
         self,
         chat_id: str,
@@ -2197,6 +2221,34 @@ class BasePlatformAdapter(ABC):
             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
         return paths, cleaned
+
+    @staticmethod
+    def extract_followup(content: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        """
+        Extract FOLLOWUP: tags from response text.
+
+        Syntax:
+            FOLLOWUP: Question text | Option 1 | Option 2
+
+        Returns:
+            Tuple of (dict with question and choices if found, cleaned content with tag removed).
+        """
+        cleaned = content
+        pattern = re.compile(r'''^[ \t]*[`"']?FOLLOWUP:\s*(.+?)[`"']?[ \t]*$''', re.MULTILINE | re.IGNORECASE)
+        match = pattern.search(content)
+        if not match:
+            return None, cleaned
+
+        line = match.group(1).strip()
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+        if len(parts) >= 2:
+            question = parts[0]
+            choices = parts[1:]
+            cleaned = pattern.sub('', cleaned, count=1)
+            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+            return {"question": question, "choices": choices}, cleaned
+
+        return None, cleaned
 
     async def _keep_typing(
         self,
@@ -3083,6 +3135,9 @@ class BasePlatformAdapter(ABC):
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
 
+                # Extract FOLLOWUP: tags before extracting images/local files
+                followup_data, response = self.extract_followup(response)
+
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)
                 # Strip any remaining internal directives from message body (fixes #1561)
@@ -3282,6 +3337,20 @@ class BasePlatformAdapter(ABC):
                             )
                     except Exception as file_err:
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
+
+                # Send extracted follow-up question UI if any
+                if followup_data:
+                    if human_delay > 0:
+                        await asyncio.sleep(human_delay)
+                    try:
+                        await self.send_followup(
+                            chat_id=event.source.chat_id,
+                            followup_data=followup_data,
+                            session_key=session_key,
+                            metadata=_thread_metadata,
+                        )
+                    except Exception as followup_err:
+                        logger.warning("[%s] Error sending followup UI: %s", self.name, followup_err)
 
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
