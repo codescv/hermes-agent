@@ -14949,7 +14949,7 @@ class AIAgent:
                                 re.IGNORECASE,
                             )
                         )
-                        if (
+                        if False and (
                             _prior_was_tool
                             and not getattr(self, "_post_tool_empty_retried", False)
                             and not _has_inline_thinking  # thinking model still working — let prefill handle
