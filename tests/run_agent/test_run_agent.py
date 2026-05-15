@@ -2590,7 +2590,7 @@ class TestRunConversation:
         assert result["api_calls"] == 2
 
     def test_reasoning_only_local_resumed_no_compression_triggered(self, agent):
-        """Reasoning-only responses no longer trigger compression — prefill then accepted."""
+        """Reasoning-only responses no longer trigger compression — treated as normal empty turn."""
         self._setup_agent(agent)
         agent.base_url = "http://127.0.0.1:1234/v1"
         agent.compression_enabled = True
@@ -2604,9 +2604,8 @@ class TestRunConversation:
             {"role": "assistant", "content": "old answer"},
         ]
 
-        # 6 responses: original + 2 prefill + 3 retries after prefill exhaustion
         with (
-            patch.object(agent, "_interruptible_api_call", side_effect=[empty_resp] * 6),
+            patch.object(agent, "_interruptible_api_call", side_effect=[empty_resp]),
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -2616,19 +2615,18 @@ class TestRunConversation:
 
         mock_compress.assert_not_called()  # no compression triggered
         assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
-        assert result["api_calls"] == 6  # 1 original + 2 prefill + 3 retries
+        assert result["final_response"] == ""
+        assert result["api_calls"] == 1
 
     def test_reasoning_only_response_prefill_then_empty(self, agent):
-        """Structured reasoning-only triggers prefill (2), then retries (3), then (empty)."""
+        """Structured reasoning-only is treated as a normal empty turn per user config."""
         self._setup_agent(agent)
         empty_resp = _mock_response(
             content=None,
             finish_reason="stop",
             reasoning_content="structured reasoning answer",
         )
-        # 6 responses: 1 original + 2 prefill + 3 retries after prefill exhaustion
-        agent.client.chat.completions.create.side_effect = [empty_resp] * 6
+        agent.client.chat.completions.create.side_effect = [empty_resp]
         with (
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -2636,46 +2634,18 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("answer me")
         assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
-        assert result["api_calls"] == 6  # 1 original + 2 prefill + 3 retries
+        assert result["final_response"] == ""
+        assert result["api_calls"] == 1
 
     def test_reasoning_only_prefill_succeeds_on_continuation(self, agent):
-        """When prefill continuation produces content, it becomes the final response."""
-        self._setup_agent(agent)
-        empty_resp = _mock_response(
-            content=None,
-            finish_reason="stop",
-            reasoning_content="structured reasoning answer",
-        )
-        content_resp = _mock_response(
-            content="Here is the actual answer.",
-            finish_reason="stop",
-        )
-        agent.client.chat.completions.create.side_effect = [empty_resp, content_resp]
-        with (
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("answer me")
-        assert result["completed"] is True
-        assert result["final_response"] == "Here is the actual answer."
-        assert result["api_calls"] == 2  # 1 original + 1 prefill continuation
-        # Prefill message should be cleaned up — no consecutive assistant messages
-        roles = [m.get("role") for m in result["messages"]]
-        for i in range(len(roles) - 1):
-            if roles[i] == "assistant" and roles[i + 1] == "assistant":
-                raise AssertionError("Consecutive assistant messages found in history")
+        pass  # Obsolete since prefill continuation is cancelled per user config
 
     def test_truly_empty_response_retries_3_times_then_empty(self, agent):
-        """Truly empty response (no content, no reasoning) retries 3 times then falls through to (empty)."""
+        """Truly empty response (no content, no reasoning) is treated as normal empty turn per user config."""
         self._setup_agent(agent)
         agent.base_url = "http://127.0.0.1:1234/v1"
         empty_resp = _mock_response(content=None, finish_reason="stop")
-        # 4 responses: 1 original + 3 nudge retries, all empty
-        agent.client.chat.completions.create.side_effect = [
-            empty_resp, empty_resp, empty_resp, empty_resp,
-        ]
+        agent.client.chat.completions.create.side_effect = [empty_resp]
         with (
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -2683,56 +2653,26 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("answer me")
         assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
-        assert result["api_calls"] == 4  # 1 original + 3 retries
+        assert result["final_response"] == ""
+        assert result["api_calls"] == 1
 
     def test_truly_empty_response_succeeds_on_nudge(self, agent):
-        """Model produces content after being nudged for empty response."""
-        self._setup_agent(agent)
-        agent.base_url = "http://127.0.0.1:1234/v1"
-        empty_resp = _mock_response(content=None, finish_reason="stop")
-        content_resp = _mock_response(
-            content="Here is the actual answer.",
-            finish_reason="stop",
-        )
-        # 1 empty response, then model produces content on nudge
-        agent.client.chat.completions.create.side_effect = [empty_resp, content_resp]
-        with (
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("answer me")
-        assert result["completed"] is True
-        assert result["final_response"] == "Here is the actual answer."
-        assert result["api_calls"] == 2  # 1 original + 1 nudge retry
+        pass  # Obsolete since nudging is cancelled per user config
 
     def test_empty_response_triggers_fallback_provider(self, agent):
-        """After 3 empty retries, fallback provider is activated and produces content."""
+        """Empty response is treated as normal and does not trigger fallback provider per user config."""
         self._setup_agent(agent)
         agent.base_url = "http://127.0.0.1:1234/v1"
-        # Configure a fallback chain
         agent._fallback_chain = [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}]
         agent._fallback_index = 0
         agent._fallback_activated = False
 
         empty_resp = _mock_response(content=None, finish_reason="stop")
-        content_resp = _mock_response(content="Fallback answer.", finish_reason="stop")
-        # 4 empty (1 orig + 3 retries), then fallback model answers
-        agent.client.chat.completions.create.side_effect = [
-            empty_resp, empty_resp, empty_resp, empty_resp, content_resp,
-        ]
+        agent.client.chat.completions.create.side_effect = [empty_resp]
 
         fallback_called = {"called": False}
-
         def _mock_fallback():
             fallback_called["called"] = True
-            # Simulate what _try_activate_fallback does: just advance the
-            # index and set the flag (the client is already mocked).
-            agent._fallback_index = 1
-            agent._fallback_activated = True
-            agent.model = "anthropic/claude-sonnet-4"
-            agent.provider = "openrouter"
             return True
 
         with (
@@ -2742,58 +2682,23 @@ class TestRunConversation:
             patch.object(agent, "_try_activate_fallback", side_effect=_mock_fallback),
         ):
             result = agent.run_conversation("answer me")
-        assert fallback_called["called"], "Fallback should have been triggered"
+        assert not fallback_called["called"]
         assert result["completed"] is True
-        assert result["final_response"] == "Fallback answer."
+        assert result["final_response"] == ""
+        assert result["api_calls"] == 1
 
     def test_empty_response_fallback_also_empty_returns_empty(self, agent):
-        """If fallback also returns empty, final response is (empty)."""
-        self._setup_agent(agent)
-        agent.base_url = "http://127.0.0.1:1234/v1"
-        agent._fallback_chain = [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}]
-        agent._fallback_index = 0
-        agent._fallback_activated = False
-
-        empty_resp = _mock_response(content=None, finish_reason="stop")
-        # 4 empty from primary (1 + 3 retries), fallback activated,
-        # then 4 more empty from fallback (1 + 3 retries), no more fallbacks
-        agent.client.chat.completions.create.side_effect = [
-            empty_resp, empty_resp, empty_resp, empty_resp,  # primary exhausted
-            empty_resp, empty_resp, empty_resp, empty_resp,  # fallback exhausted
-        ]
-
-        def _mock_fallback():
-            if agent._fallback_index >= len(agent._fallback_chain):
-                return False
-            agent._fallback_index += 1
-            agent._fallback_activated = True
-            agent.model = "anthropic/claude-sonnet-4"
-            agent.provider = "openrouter"
-            return True
-
-        with (
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-            patch.object(agent, "_try_activate_fallback", side_effect=_mock_fallback),
-        ):
-            result = agent.run_conversation("answer me")
-        assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
+        pass  # Obsolete since empty response is treated as normal turn
 
     def test_empty_response_emits_status_for_gateway(self, agent):
-        """_emit_status is called during empty retries so gateway users see feedback."""
+        """Empty response is treated as normal, no retry statuses emitted."""
         self._setup_agent(agent)
         agent.base_url = "http://127.0.0.1:1234/v1"
 
         empty_resp = _mock_response(content=None, finish_reason="stop")
-        # 4 empty: 1 original + 3 retries, all empty, no fallback
-        agent.client.chat.completions.create.side_effect = [
-            empty_resp, empty_resp, empty_resp, empty_resp,
-        ]
+        agent.client.chat.completions.create.side_effect = [empty_resp]
 
         status_messages = []
-
         def _capture_status(msg):
             status_messages.append(msg)
 
@@ -2805,12 +2710,9 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("answer me")
 
-        assert result["final_response"] == "(empty)"
-        # Should have emitted retry statuses (3 retries) + final failure
-        retry_msgs = [m for m in status_messages if "retrying" in m.lower()]
-        assert len(retry_msgs) == 3, f"Expected 3 retry status messages, got {len(retry_msgs)}: {status_messages}"
-        failure_msgs = [m for m in status_messages if "no content" in m.lower() or "no fallback" in m.lower()]
-        assert len(failure_msgs) >= 1, f"Expected at least 1 failure status, got: {status_messages}"
+        assert result["completed"] is True
+        assert result["final_response"] == ""
+        assert len(status_messages) == 0
 
     def test_partial_stream_recovery_uses_streamed_content(self, agent):
         """When streaming fails after partial delivery, recovered partial content becomes final response."""
